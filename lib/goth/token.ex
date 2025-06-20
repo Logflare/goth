@@ -303,7 +303,7 @@ defmodule Goth.Token do
   defp request(%{source: {:service_account, credentials, options}} = config)
        when is_map(credentials) and is_list(options) do
     url = Keyword.get(options, :url, @default_url)
-
+    sub = Keyword.get(options, :sub)
     claims =
       Keyword.get_lazy(options, :claims, fn ->
         scope = options |> Keyword.get(:scopes, @default_scopes) |> Enum.join(" ")
@@ -315,13 +315,26 @@ defmodule Goth.Token do
 
     jwt = jwt_encode(claims, credentials)
 
-    headers = [{"content-type", "application/x-www-form-urlencoded"}]
-    grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer"
-    body = "grant_type=#{grant_type}&assertion=#{jwt}"
+    if sub do
+     # handle SA impersonation
+      caller_headers = [{"content-type", "application/x-www-form-urlencoded"}]
+      caller_grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+      caller_body = "grant_type=#{caller_grant_type}&assertion=#{jwt}"
+      with {:ok, %{token: token}} <- request(config.http_client, method: :post, url: url, headers: caller_headers, body: caller_body) |> handle_response() do
+        headers = [{"content-type", "application/json"}, {"Authorization", "Bearer #{token}"}]
+        body = Jason.encode!(%{scope: String.split(claims["scope"], " ")})
+        url = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/#{sub}:generateAccessToken"
+        request(config.http_client, method: :post, url: url, headers: headers, body: body)
+      end
+    else
+      headers = [{"content-type", "application/x-www-form-urlencoded"}]
+      grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+      body = "grant_type=#{grant_type}&assertion=#{jwt}"
 
-    response = request(config.http_client, method: :post, url: url, headers: headers, body: body)
-
-    case handle_response(response) do
+      request(config.http_client, method: :post, url: url, headers: headers, body: body)
+    end
+    |> handle_response()
+    |> case do
       {:ok, token} ->
         sub = Map.get(claims, "sub", token.sub)
         scope = Map.get(claims, "scope", token.scope)
